@@ -1,0 +1,398 @@
+---
+title: "IE 360 Term Project Report"
+author: 'GROUP1: Ayşegül ARABACI, Berker ALP, Ulaş Diyar ÖNDER'
+date: "07/05/2024"
+output:
+  pdf_document: default
+  html_document: default
+---
+## Introduction:
+
+In this project, the main goal is to predict the hourly solar power production of Edikli GES that is located in Niğde at 38.29 North, 34.97 East between May 13 and May 26. Requirement of the task is prediction T+1 period ahead using given production data from T-1 before and given other data.
+
+We have past solar power production data of the facility. In addition to this, there are ten variables about weather conditions. These are about radiation flux, being cloudy or not, being snowy or not, humidity and temperature. Detail od These data are:
+
+DSWRF_surface: Radiation flux.
+
+USWRF_top_of_atmosphere, USWRF_surface, DLWRF_surface: Solar radiation related variables.
+
+TCDC_low.cloud.layer, TCDC_middle.cloud.layer, TCDC_high.cloud.layer, TCDC_entire.atmosphere: total cloud data at given level at atmosphere.
+
+CSNOW_surface: Solar panel covered by snow or not
+
+TMP_surface: Surface temperature
+
+There are 25 locations near the facility that have this data, in this project average of data for 25 locations calculated and the average accepted for prediction calculations.
+
+##Data Loading
+```{r setup, include=FALSE,results="hide", warning=FALSE, message=FALSE}
+library(data.table)
+library(forecast)
+library(ggplot2)
+library(padr)
+library(xts)
+require(openxlsx) #library(openxlsx)
+require(ggplot2)
+require(data.table)
+require(skimr)
+require(GGally)
+require(ggcorrplot)
+require(forecast)
+require(dplyr)
+require(lubridate)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r loading, echo=FALSE,warning=FALSE, message=FALSE}
+
+data_production <- read.csv("C:\\Users\\Berke\\Desktop\\production.csv")
+data_weather <- read.csv("C:\\Users\\Berke\\Desktop\\weather_info.csv")
+data_production <- data.table(data_production)
+data_weather <- data.table(data_weather)
+
+
+data_production[,datetime:=ymd(date) + dhours(hour)]
+data_weather[,datetime:=ymd(date) + dhours(hour)]
+
+data_production$date <- as.Date(data_production$date)
+data_weather$date <- as.Date(data_weather$date)
+
+
+
+head(data_production)
+tail(data_production)
+head(data_weather)
+```
+## Plot of Production and Autocorelation
+
+According to past data, seasonality can be observed naturally because the productions are made according to weather conditions and the weather conditions are similar from year to year. They change from certain times because of seasons( winter, spring, summer and fall). In addition, the hourly effect of the sun can be observed (day-night). After some examinations and tabulations of the data, we can check the autocorrelation, seasonality and trend. According to tables and graphs created for checking these things, we can see that autocorrelation, seasonality and trend exist for these past production data.
+
+We can see the similar patterns between autocorrelation and production graphs. Especially 1 hour, 24 hour(day) and 1 year effect can be seen. So we suggest that how much electricity is produced can be determined by production 1 hour, 24 hour, 1 year before. Since, main factor of production which is sun has seasons, the production should have the same seasons.
+
+```{r plots, echo=FALSE,warning=FALSE, message=FALSE}
+ggplot(data_production,aes(x=date,y=production,group=1)) + geom_line()
+
+
+ggplot(data_weather,aes(x=date,y=data_weather$DSWRF_surface,group=1)) + geom_line()
+```
+```{r}
+acf(data_production$production,24) # 1 day
+acf(data_production$production,48) #2 day
+acf(data_production$production,8760) #365 day
+
+```
+
+
+Since we have 25 locations with similar weather data, we decided to use average of all locations which is locations at solar production facility.
+```{r}
+#average of all panels, instead of the code above
+avr_data <- data_weather %>%
+  group_by(datetime) %>%
+  summarise(
+    average_DSWRF_surface = mean(DSWRF_surface, na.rm = TRUE),
+    average_TCDC_low.cloud.layer = mean(TCDC_low.cloud.layer, na.rm = TRUE),
+    average_TCDC_middle.cloud.layer = mean(TCDC_middle.cloud.layer, na.rm = TRUE),
+    average_TCDC_high.cloud.layer = mean(TCDC_high.cloud.layer, na.rm = TRUE),
+    average_TCDC_entire.atmosphere = mean(TCDC_entire.atmosphere, na.rm = TRUE),
+    average_USWRF_top.of.atmosphere = mean(USWRF_top_of_atmosphere, na.rm = TRUE),
+    average_CSNOW.surface = mean(CSNOW_surface, na.rm = TRUE),
+    average_DLWRF.surface = mean(DLWRF_surface, na.rm = TRUE),
+    average_USWRF.surface = mean(USWRF_surface, na.rm = TRUE),
+    average_TMP.surface = mean(TMP_surface, na.rm = TRUE),
+  )
+avr_data <- full_join(data_production,avr_data,by='datetime')
+head(avr_data)
+```
+
+## Cloud Corelation
+Here, we check correlation of cloud with production. From  the table, we see that each cloud data is correlated to production and each other. Due to multicorelianithy effect, we only selected average_TCDC_entire.atmosphere which is most correlated with production. Since the production is dependent to sun light and clouds one of the factors that covers sun lights, this correlation sounds like logical causation even though they are not strongly correlated.
+```{r}
+TCDC <- data.frame(avr_data$production,avr_data$average_TCDC_low.cloud.layer,avr_data$average_TCDC_middle.cloud.layer,avr_data$average_TCDC_high.cloud.layer,avr_data$average_TCDC_entire.atmosphere)
+ggpairs(TCDC)
+```
+
+
+## Surface Flux Tempature Radiotion etc.
+Similar to cloud effect we checked correlation for the rests. From the plot we can see multicolinearity problem exits. Because of that we decided to select most correlated data to production. They are average_TCDC_entire.atmosphere,average_USWRF.surface,average_TMP.surface,average_DSWRF_surface. Due to multicolinearity, we might able to use one of them. They are sun light dependent data so they sounds like suitable for the production prediction.
+```{r}
+surface <- data.frame(avr_data$production,avr_data$average_DSWRF_surface,avr_data$average_USWRF_top.of.atmosphere,avr_data$average_CSNOW.surface,avr_data$average_DLWRF.surface,avr_data$average_USWRF.surface,avr_data$average_TMP.surface)
+ggpairs(surface)
+```
+
+
+## Data Maniplation for Model Construction
+
+At that point we filtered our data set to include :
+datetime : Hour-Day-Month-Year of row
+production: Energy production
+average_TCDC_entire.atmosphere: Average cloud in entire atmosphere
+average_USWRF.surface: Solar radiation
+average_TMP.surface: Temperature
+average_DSWRF_surface: Radiation flux
+
+In addition we add seasonality variables we talk about at autoelation table explanation:
+day: day at datetime(useful for year effect)
+hour: hour at datetime(useful for day and night difference)
+month: month at datetime(useful for season)
+
+Finally,we also decided to previous production as variables because of autocorelation. Since previous production might have similar weather, season effect, it might be useful for model development. These previous productions are
+lag1: 1 hour before production
+lag48: 48 hour before production
+lag72: 72 hour before production
+
+At competition phase, we will be able to get 48 hour ago production data from the day we predict. Since the newest data has 48 hour ago production at least lag48 we can use. However we decided to use lag1 to test our hypothesis previous production is crious to predict next hour.
+```{r}
+model <-avr_data %>% select(datetime,production,average_TCDC_entire.atmosphere,average_USWRF.surface,average_TMP.surface,average_DSWRF_surface)
+head(model)
+```
+
+```{r}
+# Dummy Variables
+model$day <- yday(model$datetime) #day variable
+model$hour <- hour(model$datetime) #hour variable
+model$month <- month(model$datetime) #month variable
+
+model$day <- as.character(model$day)
+model$hour <- as.character(model$hour)
+model$month <- as.character(model$month)
+head(model,50)
+```
+
+```{r}
+#Lag difference
+model[is.na(model)] <- 0
+model$lag48[49:20268] = model$production[1:20220] #48 hour
+model$lag49[50:20268] = model$production[1:20219] #49 hour
+model$lag47[48:20268] = model$production[1:20221] #47 hour
+model$lag72[73:20268] = model$production[1:20196] #72 hour
+model$lag1[2:20268] = model$production[1:20267] # 1 hour
+summary(model)
+
+```
+## Linear Models Constructions
+
+At that phase, we constructed many different models with the variables we defined before. First of all we focused on R^2 of each model, residual distribution and capacity to use the model at competition phase.
+
+At lm_demo1 we used that:
+-48 hour before production
+-Average radiation flux
+-Cloud at entire atmosphere
+-hour seasonality variable
+At the model we still have autocorelation at lag 1 and lag 24. Unfortunately we won't have production at these hours so we can't eliminate that. On the other hand, the distribution of the residual likes norm at expect the center of the distribution.
+```{r}
+# lag 48 model
+lm_demo1=lm(production~lag48+hour +average_DSWRF_surface+average_TCDC_entire.atmosphere,data = model)
+summary(lm_demo1)
+checkresiduals(lm_demo1)
+```
+lm_demo1_1
+It is lm_demo1 with lag72. The results are similar to lm_demo1 but better R^2.
+```{r}
+# lag48-72 model
+lm_demo1_1=lm(production~lag48+lag72+ hour +average_DSWRF_surface+average_TCDC_entire.atmosphere,data = model)
+summary(lm_demo1_1)
+checkresiduals(lm_demo1_1)
+```
+lm_demo2
+This model build on lm_demo1 with the all variables we talk about. As we mentioned, using all of the variables from the data set are problematic due to multicolinearity. In that model we tested effect of multicolinearity and we seen that model is not better than lm_demo1. More autocorelation especially between 10 and 20 hour seen and no improvement at distribution of residuals.
+```{r}
+#Sesonality plus lag48 extra variable
+lm_demo2=lm(production~hour +month+ lag48 + average_TCDC_entire.atmosphere + average_USWRF.surface + average_TMP.surface ,data = model)
+summary(lm_demo2)
+checkresiduals(lm_demo2)
+```
+lm_demo3
+At that model, we decided to add month dummy seasonality variable which represent 4 season of the year to lm_demo1. At that point we see that similar result with lm_demo1 are seen except R^2. No improvent seen
+```{r}
+# lm_demo1 plus seasonality
+lm_demo3=lm(production~lag48+hour+month+average_TCDC_entire.atmosphere,data = model)
+summary(lm_demo3)
+checkresiduals(lm_demo3)
+```
+lm_demo3_1
+Similar to lm_demo3 but only lg-ag72 added instead of lag48. We won't expect improvement at that model but it might be useful to understand auto regressive effect and use the model when 48 hour production data does not exits.
+```{r}
+#lm_demo3 with lag72
+lm_demo3_1=lm(production~lag72+hour+month+average_TCDC_entire.atmosphere,data = model)
+summary(lm_demo3_1)
+checkresiduals(lm_demo3_1)
+```
+lm_demo3_2
+It is improved version of lm_demo3 with lag48 and lag72 together. Thanks to autoregressive effect, R^2 is 0.8165.However, similar problems we mentioned exitst.
+```{r}
+#lag48-72
+lm_demo3_2=lm(production~lag72+lag48+hour+month+average_TCDC_entire.atmosphere,data = model)
+summary(lm_demo3_2)
+checkresiduals(lm_demo3_2)
+```
+lm_demo4 andlm_demo4_1
+These two models uses lag1 which is 1 hour before production.Finally we see that if we add lag24 which is 24 before production we can most of the autocorelation problems. However, we know that at co petation phase we won't have production data between 0-48 hour before interval. Other option is prediction these inteevals and using these predictions as variable. However, we increase error of the model adding prediction error at the variables.
+```{r}
+#lag1 plus seosonality
+lm_demo4=lm(production~lag1+hour+month,data = model)
+summary(lm_demo4)
+checkresiduals(lm_demo4)
+```
+```{r}
+#lm_demo4 with variables
+lm_demo4_1=lm(production~lag1+hour +average_DSWRF_surface,data = model)
+summary(lm_demo4_1)
+checkresiduals(lm_demo4_1)
+```
+At that phase,we decided to continue in lm_demo1_1 since it has highest R^2 and applicable. At that graph we compared lm_demo1_1 prediction to actual data.Then we checked the residuals again. We see that, we failed to predict winter-fall season. On the other hand spring-summer season we made predict on that at competition phase seems like fiting. 
+```{r}
+tmp1 <- copy(model)
+tmp1$actual <- model$production
+tmp1$predicted_trend <- predict(lm_demo1_1, tmp1)
+tmp1$residual_trend <- tmp1$actual - tmp1$predicted_trend
+
+# Plot the data
+ggplot(tmp1, aes(x = model$datetime)) +
+  geom_line(aes(y = actual, color = 'real')) +
+  geom_line(aes(y = predicted_trend, color = 'predicted'))
+
+ggplot(tmp1, aes(x = model$datetime)) +
+  geom_line(aes(y = residual_trend, color = 'residual'))
+```
+
+
+## Arima Models
+From here we tried to develop arima models. Since we used autoregressive parameters at linear models, we can continue on differencing and moving average terms. First of all we tried autoarima and suggested model is (3,1,4). However the model is not seasonal and similar problems from linear model seen. Then we tried (3,1,4)(0,0,6)24 seasonal arima. We decided to use 6 seasonal moving average because within every 24 hour we saw 6 negative value autocorelation lag. Then we coluldn't find any model better than lm_demo1_1
+```{r}
+#Whole Period Arima
+arima_model <- auto.arima(model$production,seasonal = TRUE)
+summary(arima_model)
+checkresiduals(arima_model)
+```
+```{r}
+#Whole Period Arima with 1 more MA
+arima_model_1 <- arima(model$production,order = c(3L,1L,4L),seasonal = list(order = c(0L,0L,6L),period = 24))
+summary(arima_model_1)
+checkresiduals(arima_model_1)
+```
+
+
+
+
+
+
+
+
+
+
+
+## Prediction Phase
+At competition phase given code used to predict T+1 period ahead production. Generally lm_deme1_1 used if we have 48 hour before production. Otherwise lm_demo3_1 is the other alternative for us.
+```{r}
+
+data_production <- read.csv("C:\\Users\\Berke\\Desktop\\production_predict.csv")
+data_weather <- read.csv("C:\\Users\\Berke\\Desktop\\processed_weather.csv")
+data_production <- data.table(data_production)
+data_weather <- data.table(data_weather)
+
+
+data_production[,datetime:=ymd(date) + dhours(hour)]
+data_weather[,datetime:=ymd(date) + dhours(hour)]
+
+data_production$date <- as.Date(data_production$date)
+#data_production$hour <- paste(data_production$hour)
+data_weather$date <- as.Date(data_weather$date)
+#data_weather$hour <- paste(data_weather$hour)
+
+#dataxts <- xts(data_production[,"production"], order.by=data_production[,"datetime"])
+
+#average of all panels, instead of the code above
+weather_avg <- data_weather %>%
+  group_by(datetime) %>%
+  summarise(
+    average_DSWRF_surface = mean(dswrf_surface, na.rm = TRUE),
+    average_TCDC_low.cloud.layer = mean(data_weather$tcdc_low.cloud.layer, na.rm = TRUE),
+    average_TCDC_middle.cloud.layer = mean(tcdc_middle.cloud.layer, na.rm = TRUE),
+    average_TCDC_high.cloud.layer = mean(tcdc_high.cloud.layer, na.rm = TRUE),
+    average_TCDC_entire.atmosphere = mean(tcdc_entire.atmosphere, na.rm = TRUE),
+    average_USWRF_top.of.atmosphere = mean(uswrf_top_of_atmosphere, na.rm = TRUE),
+    average_CSNOW.surface = mean(csnow_surface, na.rm = TRUE),
+    average_DLWRF.surface = mean(dlwrf_surface, na.rm = TRUE),
+    average_USWRF.surface = mean(uswrf_surface, na.rm = TRUE),
+    average_TMP.surface = mean(tmp_surface, na.rm = TRUE),
+  )
+weather_avg <- full_join(data_production,weather_avg,by='datetime')
+head(weather_avg)
+```
+```{r}
+model_p <-weather_avg %>% select(datetime,production,average_TCDC_entire.atmosphere,average_USWRF.surface,average_TMP.surface,average_DSWRF_surface)
+
+model_p$day <- yday(model_p$datetime)
+model_p$hour <- hour(model_p$datetime)
+model_p$month <- month(model_p$datetime)
+
+model_p$day <- as.character(model_p$day)
+model_p$hour <- as.character(model_p$hour)
+model_p$month <- as.character(model_p$month)
+
+model_p[is.na(model_p)] <- 0
+len48 <- (length(model_p$datetime)-48)
+len49 <- (length(model_p$datetime)-49)
+len47 <- (length(model_p$datetime)-47)
+len72 <- (length(model_p$datetime)-72)
+model_p$lag48[49:length(model_p$datetime)] = model_p$production[1:len48]
+model_p$lag49[50:length(model_p$datetime)] = model_p$production[1:len49]
+model_p$lag47[48:length(model_p$datetime)] = model_p$production[1:len47]
+model_p$lag72[73:length(model_p$datetime)] = model_p$production[1:len72]
+summary(model)
+
+```
+```{r}
+model_predict <- subset(model_p,datetime >= as.POSIXct("2024-05-27 00:00:00",tz = "UTC") & datetime <= as.POSIXct("2024-05-28 00:00:00",tz = "UTC"))
+tail(model_predict,48)
+```
+
+```{r}
+#If you have day before production use that
+linear_regression_prediction <- predict(lm_demo1_1, newdata = model_predict) # test verisi bul
+result <- data.frame(linear_regression_prediction,model_predict$production)
+result
+```
+```{r}
+#If you don't have day before production use that
+linear_regression_prediction <- predict(lm_demo3_1, newdata = model_predict) # test verisi bul
+result <- data.frame(linear_regression_prediction,model_predict$production)
+result
+```
+## Conclusion:
+
+All methods are applied then their results are considered according to some different aspects. The method chosen as the most effective method for the project is the one that predicts the production for the next day based on the actual production that occurred 48 and/or 72 hours earlier. To make predictions of production, we use real data for past days and also we use other predictions for weather conditions. Blend of real data and weather predictions are the effective elements for our prediction mechanism. Therefore, reaching the optimal prediction is impossible as weather predictions don’t realize a perfect efficiency.
+
+ Since we have no reliable weather data to predict the next day, we can focus on previous production more. Since an autocorrelation effect due to hour, day, month, and season effect exists, we can add 30 days(a month) before and 90 days(a season) before production as prediction variables. As we see in arima models, a week before production as a variable might be useful. In other words, the factors coming from moving average and exponential smoothing might be useful for further work.
+ 
+Lastly, all these elements are considered and the last version of our model created to use competition phase by using:
+-48 and/or 72 hours earlier production data.
+-Total cloudiness of the weather(TCDC_entire.atmosphere)
+-Total radiation flux(DSWRF_surface)
+-hour dummy variable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
